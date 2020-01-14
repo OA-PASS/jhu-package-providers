@@ -18,6 +18,8 @@ package edu.jhu.library.pass.deposit.provider.dash;
 import au.edu.apsr.mtk.base.DmdSec;
 import au.edu.apsr.mtk.base.METSException;
 import au.edu.apsr.mtk.base.MdWrap;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import edu.jhu.library.pass.deposit.provider.shared.dspace.AbstractDspaceMetadataDomWriter;
 import org.dataconservancy.pass.client.PassClient;
 import org.dataconservancy.pass.deposit.model.DepositMetadata;
@@ -30,10 +32,13 @@ import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 
 import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -42,7 +47,7 @@ import static edu.jhu.library.pass.deposit.provider.shared.dspace.DomWriterUtil.
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.DomWriterUtil.mintId;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.DomWriterUtil.newDocument;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.DomWriterUtil.newRootElement;
-import static edu.jhu.library.pass.deposit.provider.shared.dspace.MetsMdType.DC;
+import static edu.jhu.library.pass.deposit.provider.shared.dspace.MetsMdType.OTHER;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DCT_PROV;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_ABSTRACT;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_CONTRIBUTOR;
@@ -54,11 +59,12 @@ import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.D
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_IDENTIFIER_DOI;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_IDENTIFIER_ISSN;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_PUBLISHER;
+import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_RELATION;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_SOURCE;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_SOURCE_JOURNAL;
-import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_SOURCE_VOLUME;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_TITLE;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_TYPE;
+import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_URI;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DIM;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DIM_ELEMENT;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DIM_FIELD;
@@ -76,6 +82,8 @@ import static org.joda.time.format.ISODateTimeFormat.dateHourMinute;
  * @author Elliot Metsger (emetsger@jhu.edu)
  */
 public class DashMetadataDomWriter extends AbstractDspaceMetadataDomWriter {
+
+    private static final String FIRST_AUTHOR = "firstAuthorAffiliation";
 
     private Document doc;
 
@@ -99,7 +107,8 @@ public class DashMetadataDomWriter extends AbstractDspaceMetadataDomWriter {
         try {
             MdWrap dcMdWrap = dcDmdSec.newMdWrap();
             dcMdWrap.setID(mintId());
-            dcMdWrap.setMDType(DC.getType());
+            dcMdWrap.setMDType(OTHER.getType());
+            dcMdWrap.setOtherMDType("DIM");
             dcMdWrap.setXmlData(dcRecord);
             dcDmdSec.setMdWrap(dcMdWrap);
             dcDmdSec.setGroupID(mintId());
@@ -192,12 +201,6 @@ public class DashMetadataDomWriter extends AbstractDspaceMetadataDomWriter {
                     .apply(e -> e.setTextContent(journalId));
         });
 
-        // Attach <dc:source:volume>
-        ofNullable(articleMd.getVolume()).ifPresent(volume -> {
-            dimElement(doc, DC_SOURCE, DC_SOURCE_VOLUME)
-                    .apply(e -> e.setTextContent(volume));
-        });
-
         // Attach a <dc:contributor.author> for each author of the manuscript
         metadata.getPersons()
                 .stream()
@@ -209,8 +212,28 @@ public class DashMetadataDomWriter extends AbstractDspaceMetadataDomWriter {
 
         // DASH elements
 
+        Optional<Submission> submissionResource = ofNullable(passClient.readResource(URI.create(submission.getId()), Submission.class));
+
+        // First author affiliation
+        submissionResource.ifPresent(s -> {
+            try {
+                ofNullable(new ObjectMapper().readTree(s.getMetadata()).findValue(FIRST_AUTHOR))
+                        .map(JsonNode::textValue)
+                        .ifPresent(affiliation -> {
+                            dimElement(doc, DashXMLConstants.AFFILIATION, DashXMLConstants.OTHER)
+                                    .apply(e -> {
+                                        e.setAttribute(DIM_MDSCHEMA, DashXMLConstants.DIM_MDSCHEMA_DASH);
+                                        e.setTextContent(affiliation);
+                                    });
+                        });
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        });
+
         // Add Grant and Funder info
-        ofNullable(passClient.readResource(URI.create(submission.getId()), Submission.class)).ifPresent(s -> {
+        submissionResource.ifPresent(s -> {
             s.getGrants()
                     .stream()
                     .map(u -> passClient.readResource(u, Grant.class))
@@ -233,14 +256,13 @@ public class DashMetadataDomWriter extends AbstractDspaceMetadataDomWriter {
                                     dimElement(doc, DashXMLConstants.FUNDER, DashXMLConstants.IDENTIFIER)
                                             .apply(e -> {
                                                 e.setAttribute(DIM_MDSCHEMA, DashXMLConstants.DIM_MDSCHEMA_DASH);
-                                                e.setTextContent(funder.getId().toString());
+                                                e.setTextContent(passLocatorId(funder.getLocalKey())
+                                                        .orElse(funder.getLocalKey()));
                                             });
                                 });
                     });
 
         });
-
-        // TODO DASH affiliation (pending addition to the metadata blob)
 
         // Provenance statement
 
@@ -272,7 +294,34 @@ public class DashMetadataDomWriter extends AbstractDspaceMetadataDomWriter {
                     e.setTextContent(String.format("PASS Submission identifier: %s", submission.getId()));
                 });
 
+        dimElement(doc, DC_DESCRIPTION, DCT_PROV)
+                .apply(e -> {
+                    e.setTextContent(String.format("PASS local package identifier: %s", UUID.randomUUID().toString()));
+                });
+
+        // PASS Submission URI as dc.relation.uri
+
+        submissionResource.ifPresent(s -> {
+            dimElement(doc, DC_RELATION, DC_URI)
+                    .apply(e -> e.setTextContent(s.getId().toString()));
+        });
+
         return rootElement;
+    }
+
+    /**
+     * Performs a lame heuristic on a string to determine if the string represents a PASS locator id like:
+     * {@code harvard.edu:funder:1287}, and returns the last portion of the locatorId (in the example: {@code 1287}).
+     *
+     * @param localKey the local key which may be in the form of a so-called locator id
+     * @return an Optional with the last portion of the locator id, otherwise empty
+     */
+    private static Optional<String> passLocatorId(String localKey) {
+        if (localKey.contains(":") && !localKey.endsWith(":") && localKey.split(":").length == 3) {
+            return Optional.of(localKey.substring(localKey.lastIndexOf(":") + 1));
+        }
+
+        return Optional.empty();
     }
 
     private Function<Consumer<Element>, Element> dimElement(Document doc, String elementName, String elementQualifier) {

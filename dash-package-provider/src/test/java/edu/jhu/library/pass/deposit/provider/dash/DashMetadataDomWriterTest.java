@@ -1,5 +1,8 @@
 package edu.jhu.library.pass.deposit.provider.dash;
 
+import au.edu.apsr.mtk.base.DmdSec;
+import au.edu.apsr.mtk.base.METSException;
+import edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants;
 import org.apache.commons.io.IOUtils;
 import org.dataconservancy.pass.client.PassClient;
 import org.dataconservancy.pass.deposit.model.DepositMetadata;
@@ -22,13 +25,12 @@ import org.w3c.dom.ls.LSOutput;
 import org.w3c.dom.ls.LSSerializer;
 
 import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -40,6 +42,7 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static edu.jhu.library.pass.deposit.provider.dash.DashUtil.asStream;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DCT_PROV;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_ABSTRACT;
 import static edu.jhu.library.pass.deposit.provider.shared.dspace.XMLConstants.DC_CONTRIBUTOR;
@@ -73,6 +76,10 @@ import static org.mockito.Mockito.when;
 public class DashMetadataDomWriterTest {
 
     private static final Logger LOG = LoggerFactory.getLogger(DashMetadataDomWriterTest.class);
+
+    private static final String FIRST_AUTHOR_AFFILIATION = "Harvard Divinity School";
+
+    private static final String METADATA_BLOB = "{\"publisher\":\"Wiley\",\"issue\":\"18\",\"title\":\"Key concerns about the current state of bladder cancer\",\"volume\":\"115\",\"journal-title\":\"Cancer\",\"issns\":[{\"issn\":\"1097-0142\",\"pubType\":\"Online\"},{\"issn\":\"0008-543X\",\"pubType\":\"Print\"}],\"authors\":[{\"author\":\"Yair Lotan\"},{\"author\":\"Ashish M. Kamat\"},{\"author\":\"Michael P. Porter\"},{\"author\":\"Victoria L. Robinson\"},{\"author\":\"Neal Shore\"},{\"author\":\"Michael Jewett\"},{\"author\":\"Paul F. Schelhammer\"},{\"author\":\"Ralph deVere White\"},{\"author\":\"Diane Quale\"},{\"author\":\"Cheryl T. Lee\"},{\"author\":\"undefined undefined\"}],\"journal-NLMTA-ID\":\"Cancer\",\"publicationDate\":\"2009-9-15\",\"doi\":\"10.1002/cncr.24463\",\"$schema\":\"https://oa-pass.github.com/metadata-schemas/jhu/global.json\",\"firstAuthorAffiliation\":\"" + FIRST_AUTHOR_AFFILIATION + "\",\"agent_information\":{\"name\":\"Chrome\",\"version\":\"76\"},\"agreements\":[{\"DASH\":\"DASH repository requires that its depositors sign the Assistance Authorization. An Assistance Authorization (AA) is a form you sign in order to authorize the Office for Scholarly Communication and its designated liaisons to deposit your works to DASH and make DASH-related licensing choices on your behalf. An AA also reaffirms the open-access policy if you are covered by one. Students, assistants, or other proxies cannot sign an AA on an author's behalf. Only the author may sign an AA. You will only need to sign an AA once, not one time per work. In performing this deposit in PASS, you agree to visit the above linked-to site to view and sign the Assistance Authorization form, if you have not done so already.\"}]}";
 
     private PassClient passClient;
 
@@ -112,6 +119,7 @@ public class DashMetadataDomWriterTest {
 
         passSubmission = new Submission();
         passSubmission.setId(randomUri());
+        passSubmission.setMetadata(METADATA_BLOB);
 
         DepositMetadata depositMetadata = new DepositMetadata();
 
@@ -196,6 +204,7 @@ public class DashMetadataDomWriterTest {
         passFunder = new Funder();
         passFunder.setId(randomUri());
         passFunder.setName("Funder One");
+        passFunder.setLocalKey("harvard:funder:8675309");
 
         passGrant = new Grant();
         passGrant.setId(randomUri());
@@ -227,6 +236,21 @@ public class DashMetadataDomWriterTest {
     }
 
     /**
+     * Insure the &lt;dmdSec&gt; using the correct metadata type
+     */
+    @Test
+    public void verifyMdType() throws METSException {
+        Collection<DmdSec> dmdSecs = underTest.mapDmdSec(submission);
+
+        assertEquals(1, dmdSecs.size());
+
+        DmdSec dmdSec = dmdSecs.iterator().next();
+
+        assertEquals("OTHER", dmdSec.getMdWrap().getMDType());
+        assertEquals("DIM", dmdSec.getMdWrap().getOtherMDType());
+    }
+
+    /**
      * Should be a Dublin Core "contributor.author" for each Person with a PERSON_TYPE == PERSON_TYPE.author.
      * <p>
      * The other persons should not be listed at all.
@@ -249,15 +273,12 @@ public class DashMetadataDomWriterTest {
     }
 
     /**
-     * Journal nlm title abbreviation, volume, issn(s), publisher name, publication date
+     * Journal nlm title abbreviation, issn(s), publisher name, publication date
      */
     @Test
     public void verifyJournalMeta() {
         validate(dimDoc, DC_SOURCE, DC_SOURCE_JOURNAL, (e) ->
                 assertEquals(journalMd.getJournalId(), e.getTextContent()));
-
-        validate(dimDoc, DC_SOURCE, DC_SOURCE_VOLUME, (e) ->
-                assertEquals(articleMd.getVolume(), e.getTextContent()));
 
         validate(dimDoc, DC_PUBLISHER, null, (e) ->
                 assertEquals(journalMd.getPublisherName(), e.getTextContent()));
@@ -293,13 +314,10 @@ public class DashMetadataDomWriterTest {
     }
 
     /**
-     * Article DOI, volume
+     * Article DOI
      */
     @Test
     public void verifyArticleMeta() {
-        validate(dimDoc, DC_SOURCE, DC_SOURCE_VOLUME, (e) ->
-                assertEquals(articleMd.getVolume(), e.getTextContent()));
-
         validate(dimDoc, DC_IDENTIFIER, DC_IDENTIFIER_DOI, (e) ->
                 assertEquals(articleMd.getDoi().toString(), e.getTextContent()));
     }
@@ -311,7 +329,7 @@ public class DashMetadataDomWriterTest {
     public void verifyFundersAndGrants() {
         validate(dimDoc, DashXMLConstants.FUNDER, DC_IDENTIFIER, (e) -> {
             assertEquals(DashXMLConstants.DIM_MDSCHEMA_DASH, e.getAttribute(DIM_MDSCHEMA));
-            assertEquals(passFunder.getId().toString(), e.getTextContent());
+            assertEquals(passFunder.getLocalKey().substring(passFunder.getLocalKey().lastIndexOf(":") + 1), e.getTextContent());
         });
 
         validate(dimDoc, DashXMLConstants.FUNDER, DashXMLConstants.NAME, (e) -> {
@@ -332,7 +350,7 @@ public class DashMetadataDomWriterTest {
     public void verifyProv() {
         Set<Element> provElements = elementsForDimField(dimDoc, DC_DESCRIPTION, DCT_PROV);
 
-        assertEquals(3, provElements.size());
+        assertEquals(4, provElements.size());
 
         provElements.stream()
                 .filter(provE -> provE.getTextContent().contains(passSubmission.getId().toString()))
@@ -349,6 +367,39 @@ public class DashMetadataDomWriterTest {
                 .filter(provE -> provE.getTextContent().contains("Metadata generated by PASS on"))
                 .findAny()
                 .orElseThrow(() -> new RuntimeException("Missing prov element with the metadata generation date"));
+
+        provElements.stream()
+                .filter(provE -> provE.getTextContent().contains("PASS local package identifier"))
+                .findAny()
+                .orElseThrow(() -> new RuntimeException("Missing prov element with the PASS local package identifier"));
+    }
+
+    /**
+     * The DIM metadata document should include the 'firstAuthorAffiliation' from the metadata blob as dash.affiliation.other.
+     */
+    @Test
+    public void verifyAuthorAffiliation() {
+        Set<Element> affiliationElement = elementsForDimField(dimDoc, DashXMLConstants.AFFILIATION, DashXMLConstants.OTHER);
+
+        assertEquals(1, affiliationElement.size());
+
+        Element e = affiliationElement.iterator().next();
+
+        assertEquals(FIRST_AUTHOR_AFFILIATION, e.getTextContent());
+    }
+
+    /**
+     * The DIM metadata document should include the Submission URI as dc.relation.uri.
+     */
+    @Test
+    public void verifyPassSubmissionId() {
+        Set<Element> submissionUriElements = elementsForDimField(dimDoc, XMLConstants.DC_RELATION, XMLConstants.DC_URI);
+
+        assertEquals(1, submissionUriElements.size());
+
+        Element e = submissionUriElements.iterator().next();
+
+        assertEquals(submission.getId(), e.getTextContent());
     }
 
     private static void validate(Element dimDoc, String fieldName, String qualifier, Consumer<Element> validator) {
@@ -390,26 +441,6 @@ public class DashMetadataDomWriterTest {
                 .filter(e -> fieldName.equals(e.getAttribute(DIM_ELEMENT)) && qualifier.equals(e.getAttribute(DIM_QUALIFIER)))
                 .findAny()
                 .orElseThrow(() -> new RuntimeException("Missing expected DIM field " + fieldName + " with qualifier " + qualifier));
-    }
-
-    private static Stream<Node> asStream(NodeList nodeList) {
-        int characteristics = SIZED | ORDERED;
-        Stream<Node> nodeStream = stream(new Spliterators.AbstractSpliterator<Node>(nodeList.getLength(), characteristics) {
-            int index = 0;
-
-            @Override
-            public boolean tryAdvance(Consumer<? super Node> action) {
-                if (nodeList.getLength() == index) {
-                    return false;
-                }
-
-                action.accept(nodeList.item(index++));
-
-                return true;
-            }
-        }, false);
-
-        return nodeStream;
     }
 
     private static void writeDim(Element dimDoc, OutputStream out) {
